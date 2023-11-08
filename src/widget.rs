@@ -1,3 +1,4 @@
+use glib::clone;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -6,12 +7,14 @@ use gdk::cairo::RectangleInt;
 use gdk::cairo::Region;
 use gtk::{ApplicationWindow, Application, gdk::Display};
 use gio::{prelude::*, ApplicationFlags};
-use gtk::prelude::{GtkWindowExt, WidgetExt, ContainerExt};
+// use gtk::prelude::{GtkWindowExt, WidgetExt, ContainerExt};
+use gtk::prelude::*;
 use gtk_layer_shell::{Edge, LayerShell};
 use webkit2gtk::WebViewExt;
 use webkit2gtk::WebView;
 use crate::config::{WidgetConfiguration, get_widget_configurations};
 use crate::utils;
+use gtk::glib;
 
 #[derive(Clone, Debug)]
 struct WidgetInstance {
@@ -151,8 +154,6 @@ fn show_window(window: &ApplicationWindow, config: &WidgetConfiguration) {
 }
 
 fn build_widget(application: &Application, config: WidgetConfiguration) -> Vec<WidgetInstance> {
-  println!("build widget: {}", config.application_name);
-
   let widget_monitors: Vec<i32> = {
     let count = Display::default().unwrap().n_monitors();
 
@@ -162,6 +163,8 @@ fn build_widget(application: &Application, config: WidgetConfiguration) -> Vec<W
       (0 .. count).collect()
     }
   };
+
+  println!("widget monitors: {:?}", widget_monitors);
 
   widget_monitors.into_iter().map(|monitor| {
     // create webview by using the config root
@@ -187,36 +190,60 @@ fn build_widget(application: &Application, config: WidgetConfiguration) -> Vec<W
   }).collect()
 }
 
-pub fn start_widgets(rx: mpsc::Receiver<WidgetInstanceInstruction>) {
-    thread::spawn(move || {
-      gtk::init().unwrap();
+pub fn start_widgets(rx: Arc<Mutex<async_channel::Receiver<WidgetInstanceInstruction>>>) {
+  thread::spawn(move || {
+    gtk::init().unwrap();
 
-      let app = Application::new(Some("org.gnome.webkit6-rs.example"), ApplicationFlags::FLAGS_NONE);
+    let app = Application::new(Some("org.gnome.webkit6-rs.example"), ApplicationFlags::FLAGS_NONE);
 
-      app.connect_activate(move | app | {
-        let mut all = get_widget_configurations().into_iter().map(|config| build_widget(&app, config)).flatten().collect::<Vec<WidgetInstance>>();
+    app.connect_activate(move | app | {
+      let all = Arc::new(
+        Mutex::new(
+          get_widget_configurations().into_iter().map(|config| build_widget(&app, config)).flatten().collect::<Vec<WidgetInstance>>()
+        )
+      );
 
-        for r in rx.iter() {
-          match r {
-            WidgetInstanceInstruction::List => {
-            },
-            WidgetInstanceInstruction::Show(layer, app) => {
-                for e in all {
-                    if e.layer == layer && e.application_name == app {
-                        e.window.show();
-                    }
-                }
-                all = vec![];
-            },
-            WidgetInstanceInstruction::Hide(layer, app) => {
-            },
-            WidgetInstanceInstruction::Reload(layer, app) => {
-            },
+      glib::spawn_future_local(clone!(@strong all, @strong rx => async move {
+        let t = rx.lock().expect("could not lock rx");
+
+        println!("running");
+
+        loop {
+          println!("running something");
+          match t.recv().await {
+              Ok(r) => {
+                  println!("reading something {:?}", r);
+
+                  let mut all = all.lock().unwrap();
+
+                  match r {
+                    WidgetInstanceInstruction::List => {
+                        println!("received");
+                        for e in all.to_owned() {
+                            println!("{}: {}", e.application_name, e.id);
+                        }
+                    },
+                    WidgetInstanceInstruction::Show(layer, app) => {
+                        for e in all.to_owned() {
+                            if e.layer == layer && e.application_name == app {
+                                e.window.show();
+                            }
+                        }
+                        *all = vec![];
+                    },
+                    WidgetInstanceInstruction::Hide(layer, app) => {
+                    },
+                    WidgetInstanceInstruction::Reload(layer, app) => {
+                    },
+                  }
+              },
+              Err(_) => {}
           }
         }
-      });
-
-      app.run();
+      }));
     });
+
+    app.run_with_args::<&str>(&[]);
+  });
 }
 
