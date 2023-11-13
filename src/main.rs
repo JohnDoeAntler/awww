@@ -13,11 +13,10 @@ use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
 use std::io::prelude::*;
 use std::path::Path;
-use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use widget::start_widgets;
-use widget::WidgetInstanceInstruction;
+use widget::WidgetInstanceInstructionCommand;
 
 // include the module "webserver"
 
@@ -46,41 +45,51 @@ fn init_daemon() {
     listen_unix_socket(tx);
 }
 
-fn listen_unix_socket(tx: async_channel::Sender<WidgetInstanceInstruction>) {
+fn listen_unix_socket(tx: async_channel::Sender<(Arc<UnixStream>, WidgetInstanceInstructionCommand)>) {
     let socket = Path::new(SOCKET_PATH);
 
     if socket.exists() {
         fs::remove_file(&socket).expect("failed to remove old socket file.");
     }
 
-    let stream = match UnixListener::bind(&socket) {
+    let listener = match UnixListener::bind(&socket) {
         Err(_) => panic!("failed to bind socket"),
         Ok(stream) => stream,
     };
 
-    for stream in stream.incoming() {
-        match stream {
-            Ok(stream) => {
-                BufReader::new(stream).lines().for_each(|line| {
-                    if let Err(_) = line {
-                        return;
-                    }
-
-                    let line = line.unwrap();
-
-                    println!("received: {}", line);
-
-                    match line.as_str() {
-                        "list" => { let _ = tx.send_blocking(WidgetInstanceInstruction::List); }
-                        _ => {}
-                    }
-                });
-            }
-            Err(err) => {
-                println!("Error: {}", err);
-                break;
-            }
+    for stream in listener.incoming() {
+        if let Err(_) = stream {
+            return;
         }
+        let stream = stream.unwrap();
+
+        println!("received a unix stream.");
+        let stream = Arc::new(stream);
+        let e = &*stream;
+        let lines = BufReader::new(e).lines();
+
+        lines.for_each(|line| {
+            if let Err(_) = line {
+                return;
+            }
+
+            let line = line.unwrap();
+
+            println!("received command from unix socket: \"{}\"", line);
+
+            let stream = Arc::clone(&stream);
+
+            match line.as_str() {
+                "list" => {
+                    println!("sending list command");
+                    let _ = tx.send_blocking((
+                        stream,
+                        WidgetInstanceInstructionCommand::List
+                    )); 
+                }
+                _ => {}
+            }
+        });
     }
 }
 
@@ -112,7 +121,19 @@ fn main() {
         }
         Commands::List => {
             let mut stream = connect_to_socket();
-            stream.write_all(b"list").expect("failed to write");
+            stream.write_all(b"list\n").expect("failed to write");
+            // read the callback
+            println!("waiting for response");
+
+            BufReader::new(stream).lines().for_each(|line| {
+                if let Err(_) = line {
+                    return;
+                }
+
+                let line = line.unwrap();
+
+                println!("received: {}", line);
+            });
         }
     }
 }
@@ -132,3 +153,4 @@ fn main() {
 // });
 
 // println!("executed: {}", );
+

@@ -1,4 +1,5 @@
 use glib::clone;
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -15,6 +16,7 @@ use webkit2gtk::WebView;
 use crate::config::{WidgetConfiguration, get_widget_configurations};
 use crate::utils;
 use gtk::glib;
+use std::io::prelude::*;
 
 #[derive(Clone, Debug)]
 struct WidgetInstance {
@@ -43,7 +45,7 @@ impl WidgetInstance {
 }
 
 #[derive(Clone, Debug)]
-pub enum WidgetInstanceInstruction {
+pub enum WidgetInstanceInstructionCommand {
     // 1. layer
     // 2. application name
     Show(String, String),
@@ -164,8 +166,6 @@ fn build_widget(application: &Application, config: WidgetConfiguration) -> Vec<W
     }
   };
 
-  println!("widget monitors: {:?}", widget_monitors);
-
   widget_monitors.into_iter().map(|monitor| {
     // create webview by using the config root
     let webview = create_webview(config.get_webview_root());
@@ -190,7 +190,7 @@ fn build_widget(application: &Application, config: WidgetConfiguration) -> Vec<W
   }).collect()
 }
 
-pub fn start_widgets(rx: Arc<Mutex<async_channel::Receiver<WidgetInstanceInstruction>>>) {
+pub fn start_widgets(rx: Arc<Mutex<async_channel::Receiver<(Arc<UnixStream>, WidgetInstanceInstructionCommand)>>>) {
   thread::spawn(move || {
     gtk::init().unwrap();
 
@@ -206,24 +206,25 @@ pub fn start_widgets(rx: Arc<Mutex<async_channel::Receiver<WidgetInstanceInstruc
       glib::spawn_future_local(clone!(@strong all, @strong rx => async move {
         let t = rx.lock().expect("could not lock rx");
 
-        println!("running");
-
         loop {
-          println!("running something");
           match t.recv().await {
               Ok(r) => {
-                  println!("reading something {:?}", r);
-
+                  println!("received a command");
                   let mut all = all.lock().unwrap();
 
-                  match r {
-                    WidgetInstanceInstruction::List => {
-                        println!("received");
+                  match r.1 {
+                    WidgetInstanceInstructionCommand::List => {
+                        println!("received a list command");
                         for e in all.to_owned() {
+                            let mut t = &*r.0;
+
+                            t.write(b"yoo").expect("hi");
+
                             println!("{}: {}", e.application_name, e.id);
                         }
+                        println!("done");
                     },
-                    WidgetInstanceInstruction::Show(layer, app) => {
+                    WidgetInstanceInstructionCommand::Show(layer, app) => {
                         for e in all.to_owned() {
                             if e.layer == layer && e.application_name == app {
                                 e.window.show();
@@ -231,9 +232,9 @@ pub fn start_widgets(rx: Arc<Mutex<async_channel::Receiver<WidgetInstanceInstruc
                         }
                         *all = vec![];
                     },
-                    WidgetInstanceInstruction::Hide(layer, app) => {
+                    WidgetInstanceInstructionCommand::Hide(layer, app) => {
                     },
-                    WidgetInstanceInstruction::Reload(layer, app) => {
+                    WidgetInstanceInstructionCommand::Reload(layer, app) => {
                     },
                   }
               },
